@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>BH Picture Scraper</h1>
+
+  <div class="setting">
+    <label for="parentDir">Save folder:</label>
+    <div class="input-row">
+      <input type="text" id="parentDir" placeholder="BrightHorizons">
+      <button id="saveDir" title="Save">&#10003;</button>
+    </div>
+    <div class="hint">Relative to Downloads folder</div>
+  </div>
+
+  <div class="stats">
+    <span id="count">0</span> image(s) captured
+  </div>
+
+  <div id="hint" class="hint" style="display:none;">
+    Browse your BH photo pages to capture images.
+  </div>
+
+  <div id="urlList" class="url-list"></div>
+
+  <div class="actions">
+    <button id="downloadAll" class="primary">Download All</button>
+    <button id="clearAll">Clear</button>
+  </div>
+
+  <div id="status" class="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
