@@ -108,6 +108,22 @@ h1 {
   font-weight: 600;
 }
 
+.actions button.scan {
+  background: #ff9800;
+  color: #fff;
+  border-color: #ff9800;
+}
+
+.actions button.scan:hover {
+  background: #e68900;
+}
+
+.actions button.scan:disabled {
+  background: #ffcc80;
+  border-color: #ffcc80;
+  cursor: not-allowed;
+}
+
 .actions button.primary {
   background: #1a73e8;
   color: #fff;

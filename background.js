@@ -94,6 +94,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleClearEntries(message.tabId).then(sendResponse);
     return true;
   }
+
+  if (message.type === "scanTab") {
+    handleScanTab(message.tabId).then(sendResponse);
+    return true;
+  }
 });
 
 // --- Step 3: Refresh badge when popup opens (survives SW restart) ---
@@ -170,4 +175,87 @@ async function handleClearEntries(tabId) {
   persistTab(key);
   updateBadge(tabId, 0);
   return { success: true };
+}
+
+// --- DOM Scanning: inject into the active tab, find matching URLs, append ?t=d ---
+const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^"'\s]+\/media\/m\/snapshot\/[0-9a-f-]+/gi;
+
+async function handleScanTab(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: scanDomForUrls,
+      args: [SCAN_URL_REGEX.source],
+    });
+
+    const foundUrls = results[0]?.result || [];
+    if (foundUrls.length === 0) {
+      return { success: true, added: 0, message: "No matching URLs found in page" };
+    }
+
+    const key = `tab_${tabId}`;
+    const entries = tabEntries.get(key) || [];
+    let added = 0;
+
+    for (const rawUrl of foundUrls) {
+      // Strip any existing query string and append ?t=d
+      const cleanUrl = rawUrl.split("?")[0];
+      const downloadUrl = cleanUrl + "?t=d";
+
+      const uuidMatch = cleanUrl.match(/\/snapshot\/([0-9a-f-]+)/i);
+      if (!uuidMatch) continue;
+
+      const uuid = uuidMatch[1];
+      if (entries.some((e) => e.uuid === uuid)) continue;
+
+      entries.push({ uuid, url: downloadUrl, timestamp: Date.now() });
+      added++;
+    }
+
+    if (added > 0) {
+      tabEntries.set(key, entries);
+      persistTab(key);
+      updateBadge(tabId, entries.length);
+    }
+
+    return { success: true, added, total: entries.length };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// This function runs inside the tab's page context
+function scanDomForUrls(patternSource) {
+  const regex = new RegExp(patternSource, "gi");
+  const urls = new Set();
+
+  // Scan all elements for src, href, data-src, data-original, poster, srcset
+  const attrs = ["src", "href", "data-src", "data-original", "poster"];
+  for (const el of document.querySelectorAll("*")) {
+    for (const attr of attrs) {
+      const val = el.getAttribute(attr);
+      if (val) {
+        const matches = val.match(regex);
+        if (matches) matches.forEach((m) => urls.add(m));
+      }
+    }
+    // Check srcset (contains URLs with descriptors)
+    const srcset = el.getAttribute("srcset");
+    if (srcset) {
+      const matches = srcset.match(regex);
+      if (matches) matches.forEach((m) => urls.add(m));
+    }
+    // Check inline style for background-image urls
+    const style = el.getAttribute("style");
+    if (style) {
+      const matches = style.match(regex);
+      if (matches) matches.forEach((m) => urls.add(m));
+    }
+  }
+
+  // Also scan the full page HTML as a fallback (catches URLs in scripts, data attrs, etc.)
+  const htmlMatches = document.documentElement.outerHTML.match(regex);
+  if (htmlMatches) htmlMatches.forEach((m) => urls.add(m));
+
+  return [...urls];
 }

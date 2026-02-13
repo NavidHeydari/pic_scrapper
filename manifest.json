@@ -6,7 +6,9 @@
   "permissions": [
     "webRequest",
     "downloads",
-    "storage"
+    "storage",
+    "scripting",
+    "activeTab"
   ],
   "host_permissions": [
     "https://mbdgw.brighthorizons.com/*"

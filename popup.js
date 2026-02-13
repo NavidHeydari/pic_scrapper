@@ -3,6 +3,7 @@ const saveDirBtn = document.getElementById("saveDir");
 const countEl = document.getElementById("count");
 const hintEl = document.getElementById("hint");
 const urlListEl = document.getElementById("urlList");
+const scanPageBtn = document.getElementById("scanPage");
 const downloadAllBtn = document.getElementById("downloadAll");
 const clearAllBtn = document.getElementById("clearAll");
 const statusEl = document.getElementById("status");
@@ -85,6 +86,29 @@ downloadAllBtn.addEventListener("click", async () => {
     setStatus(response.error || "Download failed", "error");
   }
 
+  await refreshEntries();
+});
+
+scanPageBtn.addEventListener("click", async () => {
+  scanPageBtn.disabled = true;
+  setStatus("Scanning page...");
+
+  const response = await chrome.runtime.sendMessage({
+    type: "scanTab",
+    tabId: currentTabId,
+  });
+
+  if (response.success) {
+    if (response.added > 0) {
+      setStatus(`Found ${response.added} new image(s) (${response.total} total)`, "success");
+    } else {
+      setStatus(response.message || "No new images found", "success");
+    }
+  } else {
+    setStatus(response.error || "Scan failed", "error");
+  }
+
+  scanPageBtn.disabled = false;
   await refreshEntries();
 });
 
