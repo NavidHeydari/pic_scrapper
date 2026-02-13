@@ -91,21 +91,47 @@ downloadAllBtn.addEventListener("click", async () => {
 
 scanPageBtn.addEventListener("click", async () => {
   scanPageBtn.disabled = true;
+  downloadAllBtn.disabled = true;
   setStatus("Scanning page...");
 
-  const response = await chrome.runtime.sendMessage({
+  const scanResponse = await chrome.runtime.sendMessage({
     type: "scanTab",
     tabId: currentTabId,
   });
 
-  if (response.success) {
-    if (response.added > 0) {
-      setStatus(`Found ${response.added} new image(s) (${response.total} total)`, "success");
-    } else {
-      setStatus(response.message || "No new images found", "success");
-    }
+  if (!scanResponse.success) {
+    setStatus(scanResponse.error || "Scan failed", "error");
+    scanPageBtn.disabled = false;
+    await refreshEntries();
+    return;
+  }
+
+  const total = scanResponse.total || 0;
+  if (total === 0) {
+    setStatus(scanResponse.message || "No images found", "success");
+    scanPageBtn.disabled = false;
+    await refreshEntries();
+    return;
+  }
+
+  // Automatically download all collected images
+  setStatus(`Found ${total} image(s), downloading...`);
+  const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
+
+  const dlResponse = await chrome.runtime.sendMessage({
+    type: "downloadAll",
+    tabId: currentTabId,
+    parentDir: settings.parentDir,
+  });
+
+  if (dlResponse.success) {
+    const succeeded = dlResponse.results.filter((r) => r.success).length;
+    const failed = dlResponse.results.filter((r) => !r.success).length;
+    let msg = `Downloaded ${succeeded} image(s)`;
+    if (failed > 0) msg += `, ${failed} failed`;
+    setStatus(msg, failed > 0 ? "error" : "success");
   } else {
-    setStatus(response.error || "Scan failed", "error");
+    setStatus(dlResponse.error || "Download failed", "error");
   }
 
   scanPageBtn.disabled = false;

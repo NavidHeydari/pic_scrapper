@@ -52,7 +52,9 @@ chrome.webRequest.onCompleted.addListener(
 
     if (entries.some((e) => e.uuid === uuid)) return;
 
-    entries.push({ uuid, url: details.url, timestamp: Date.now() });
+    // Store the download URL with ?d=t appended
+    const cleanUrl = details.url.split("?")[0];
+    entries.push({ uuid, url: cleanUrl + "?d=t", timestamp: Date.now() });
     tabEntries.set(key, entries);
     persistTab(key);
 
@@ -135,9 +137,20 @@ async function handleDownloadAll(tabId, parentDir) {
   for (const entry of entries) {
     const filename = `${dir}/${dateFolder}/snapshot_${entry.uuid}.jpg`;
     try {
+      // Fetch the image as a blob first so Chrome cannot override the
+      // .jpg extension based on the server's Content-Type header.
+      const response = await fetch(entry.url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const blobUrl = URL.createObjectURL(
+        new Blob([blob], { type: "image/jpeg" })
+      );
+
       const downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download(
-          { url: entry.url, filename, conflictAction: "uniquify" },
+          { url: blobUrl, filename, conflictAction: "uniquify" },
           (id) => {
             if (chrome.runtime.lastError) {
               reject(new Error(chrome.runtime.lastError.message));
@@ -147,6 +160,8 @@ async function handleDownloadAll(tabId, parentDir) {
           }
         );
       });
+
+      URL.revokeObjectURL(blobUrl);
       results.push({ uuid: entry.uuid, downloadId, success: true });
     } catch (err) {
       results.push({ uuid: entry.uuid, success: false, error: err.message });
@@ -177,7 +192,7 @@ async function handleClearEntries(tabId) {
   return { success: true };
 }
 
-// --- DOM Scanning: inject into the active tab, find matching URLs, append ?t=d ---
+// --- DOM Scanning: inject into the active tab, find matching URLs, append ?d=t ---
 const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^"'\s]+\/media\/m\/snapshot\/[0-9a-f-]+/gi;
 
 async function handleScanTab(tabId) {
@@ -198,9 +213,9 @@ async function handleScanTab(tabId) {
     let added = 0;
 
     for (const rawUrl of foundUrls) {
-      // Strip any existing query string and append ?t=d
+      // Strip any existing query string and append ?d=t for download
       const cleanUrl = rawUrl.split("?")[0];
-      const downloadUrl = cleanUrl + "?t=d";
+      const downloadUrl = cleanUrl + "?d=t";
 
       const uuidMatch = cleanUrl.match(/\/snapshot\/([0-9a-f-]+)/i);
       if (!uuidMatch) continue;
