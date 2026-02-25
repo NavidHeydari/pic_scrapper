@@ -1,0 +1,95 @@
+flowchart TD
+
+    subgraph BOOT["Service Worker — Startup"]
+        A([Extension loads]) --> B[Restore tab entries\nfrom session storage]
+        B --> C[Register listeners:\nwebRequest · tabs · runtime.onMessage]
+    end
+
+    subgraph PASSIVE["Service Worker — Passive Interception"]
+        P1([webRequest: BH snapshot\nrequest completes]) --> P2{HTTP 200?}
+        P2 -- No --> P_DROP[Ignore]
+        P2 -- Yes --> P3[toDownloadUrl:\nvalidate version + RFC 4122 UUID\nbuild canonical url+?d=t]
+        P3 --> P4{Valid?}
+        P4 -- No --> P_DROP
+        P4 -- Yes --> P5{UUID already\nin tab entries?}
+        P5 -- Yes --> P_DROP
+        P5 -- No --> P6[Push entry:\nuuid · url · name · timestamp]
+        P6 --> P7[Persist to session storage]
+        P7 --> P8[Update badge count]
+    end
+
+    subgraph POPUP_OPEN["Popup — Open"]
+        PO1([User opens popup]) --> PO2[Get active tab ID]
+        PO2 --> PO3[Send: getEntries]
+        PO3 --> PO4{Entries in\nSW memory?}
+        PO4 -- No --> PO5[Restore from\nsession storage]
+        PO5 --> PO6
+        PO4 -- Yes --> PO6[Refresh badge\nRender filename list\nEnable Download All if count > 0]
+    end
+
+    subgraph SCAN["Popup — Scan Page clicked"]
+        S1([User clicks Scan Page]) --> S2[Disable buttons\nClear failure list]
+        S2 --> S3[Send: scanTab]
+
+        subgraph INJ["Injected into tab page context"]
+            I1[Scan document.documentElement.outerHTML\nfor snapshot URLs and HTM URLs]
+            I1 --> I2[Return:\nsnapshotUrls · htmUrls\nas deduplicated arrays]
+        end
+
+        S3 --> INJ
+        INJ --> S4{Any URLs\nfound?}
+        S4 -- None --> S_NONE[Return: No matching URLs found]
+
+        S4 -- Yes --> S5[For each snapshotUrl:\ntoDownloadUrl → skip if invalid\nskip if UUID duplicate\npush entry]
+
+        S5 --> S6[For each htmUrl:\nfetchHtmAndExtractImages]
+
+        subgraph HTM_FETCH["Service Worker — Fetch HTM pages"]
+            H1[fetch htmUrl] --> H2{HTTP OK?}
+            H2 -- No --> H_FAIL[Record failure:\nurl + error message]
+            H2 -- Yes --> H3[Parse HTML text:\nmatch snapshot URL pattern\nmatch .jpg/.jpeg URLs]
+            H3 --> H4[For each image URL:\ntoDownloadUrl → skip if invalid\nskip if UUID duplicate\npush entry]
+        end
+
+        S6 --> HTM_FETCH
+        HTM_FETCH --> S7{added > 0?}
+        S7 -- Yes --> S8[Persist entries\nUpdate badge]
+        S7 -- No --> S9
+        S8 --> S9[Return:\nadded · total · htmFound · failures]
+
+        S9 --> S10[Show scan result\nShow failure cards if any\nRe-enable Scan Page button]
+        S_NONE --> S10
+
+        S10 --> S11{total > 0?}
+        S11 -- No --> S_DONE[Done]
+        S11 -- Yes --> AUTO_DL[Auto-trigger Download All]
+    end
+
+    subgraph DL["Service Worker — Download All"]
+        D1([downloadAll triggered]) --> D2[Sanitize save dir\nBuild date folder: YYYY-MM-DD]
+        D2 --> D3[For each entry in tab]
+        D3 --> D4[chrome.downloads.download\nurl: entry.url\nfilename: dir/date/name.jpg\nconflictAction: uniquify]
+        D4 --> D5{chrome.downloads\nsucceeded?}
+        D5 -- No --> D_FAIL[Record failure:\nuuid + error message]
+        D5 -- Yes --> D_OK[Record success:\nuuid + downloadId]
+        D_FAIL --> D6
+        D_OK --> D6{More entries?}
+        D6 -- Yes --> D3
+        D6 -- Done --> D7[Remove successful entries\nKeep failed entries for retry]
+        D7 --> D8[Persist remaining\nUpdate badge to remaining count]
+        D8 --> D9[Return: results array]
+    end
+
+    subgraph DL_RESULT["Popup — Download Result"]
+        R1[Show: N downloaded · M failed] --> R2{Any failures?}
+        R2 -- Yes --> R3[Render failure cards:\nURL + error reason\nfor both scan + download failures]
+        R2 -- No --> R4[Done ✓]
+    end
+
+    subgraph CLEAR["Popup — Clear"]
+        CL1([User clicks Clear]) --> CL2[Send: clearEntries\nDelete all entries\nbadge = 0]
+        CL2 --> CL3[Clear failure list\nRefresh UI]
+    end
+
+    AUTO_DL --> DL
+    DL --> DL_RESULT
