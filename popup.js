@@ -47,7 +47,7 @@ async function refreshEntries() {
   for (const entry of entries) {
     const div = document.createElement("div");
     div.className = "url-item";
-    div.textContent = `snapshot_${entry.uuid}.jpg`;
+    div.textContent = entry.name || `snapshot_${entry.uuid}.jpg`;
     urlListEl.appendChild(div);
   }
 }

@@ -13,11 +13,9 @@ function toDownloadUrl(rawUrl) {
   );
   if (!m) return null;
   const uuid = m[2].toLowerCase();
-  const url = `https://mbdgw.brighthorizons.com/api/parent/medias/${m[1]}/media/m/snapshot/${uuid}?d=t`;
-  return DOWNLOAD_URL_REGEX.test(url) ? { uuid, url } : null;
+  return { uuid, url: `https://mbdgw.brighthorizons.com/api/parent/medias/${m[1]}/media/m/snapshot/${uuid}?d=t` };
 }
 
-// --- Step 1: In-memory Map as primary store (no races) ---
 const tabEntries = new Map();
 
 async function restoreFromStorage() {
@@ -40,7 +38,6 @@ function persistTab(key) {
 
 restoreFromStorage();
 
-// --- Step 4: Path sanitization ---
 function sanitizePath(dir) {
   return dir
     .replace(/\.\./g, "")           // remove path traversal
@@ -117,7 +114,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// --- Step 3: Refresh badge when popup opens (survives SW restart) ---
 async function handleGetEntries(tabId) {
   const key = `tab_${tabId}`;
 
@@ -134,7 +130,6 @@ async function handleGetEntries(tabId) {
   return { entries };
 }
 
-// --- Step 2: Only remove successfully downloaded entries ---
 async function handleDownloadAll(tabId, parentDir) {
   const key = `tab_${tabId}`;
   const entries = tabEntries.get(key) || [];
@@ -151,9 +146,6 @@ async function handleDownloadAll(tabId, parentDir) {
   for (const entry of entries) {
     const filename = `${dir}/${dateFolder}/${entry.name || `snapshot_${entry.uuid}.jpg`}`;
     try {
-      // Pass the validated HTTPS URL directly to chrome.downloads — no blob
-      // detour needed, and avoids URL.createObjectURL which is unavailable
-      // in a Service Worker context.
       const downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download(
           { url: entry.url, filename, conflictAction: "uniquify", saveAs: false },
@@ -272,7 +264,7 @@ async function handleScanTab(tabId) {
       }
     }
 
-    if (added > 0 || entries.length > 0) {
+    if (added > 0) {
       tabEntries.set(key, entries);
       persistTab(key);
       updateBadge(tabId, entries.length);
@@ -292,32 +284,9 @@ async function handleScanTab(tabId) {
 
 // This function runs inside the tab's page context
 function scanDomForUrls(snapshotPatternSource, htmPatternSource) {
-  const snapshotRegex = new RegExp(snapshotPatternSource, "gi");
-  const htmRegex = new RegExp(htmPatternSource, "gi");
-  const snapshotUrls = new Set();
-  const htmUrls = new Set();
-
-  function scanValue(val) {
-    snapshotRegex.lastIndex = 0;
-    const sm = val.match(snapshotRegex);
-    if (sm) sm.forEach((m) => snapshotUrls.add(m));
-    htmRegex.lastIndex = 0;
-    const hm = val.match(htmRegex);
-    if (hm) hm.forEach((m) => htmUrls.add(m));
-  }
-
-  const attrs = ["src", "href", "data-src", "data-original", "poster", "srcset"];
-  for (const el of document.querySelectorAll("*")) {
-    for (const attr of attrs) {
-      const val = el.getAttribute(attr);
-      if (val) scanValue(val);
-    }
-    const style = el.getAttribute("style");
-    if (style) scanValue(style);
-  }
-
-  // Scan the full page HTML as a fallback (catches URLs in scripts, data attrs, etc.)
-  scanValue(document.documentElement.outerHTML);
-
-  return { snapshotUrls: [...snapshotUrls], htmUrls: [...htmUrls] };
+  const html = document.documentElement.outerHTML;
+  return {
+    snapshotUrls: [...new Set(html.match(new RegExp(snapshotPatternSource, "gi")) || [])],
+    htmUrls:      [...new Set(html.match(new RegExp(htmPatternSource,      "gi")) || [])],
+  };
 }
