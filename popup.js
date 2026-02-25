@@ -7,6 +7,7 @@ const scanPageBtn = document.getElementById("scanPage");
 const downloadAllBtn = document.getElementById("downloadAll");
 const clearAllBtn = document.getElementById("clearAll");
 const statusEl = document.getElementById("status");
+const failureListEl = document.getElementById("failureList");
 
 let currentTabId = null;
 
@@ -56,6 +57,27 @@ function setStatus(text, type) {
   statusEl.className = "status" + (type ? ` ${type}` : "");
 }
 
+function showFailures(failures) {
+  failureListEl.innerHTML = "";
+  for (const f of failures) {
+    const div = document.createElement("div");
+    div.className = "failure-item";
+    const urlSpan = document.createElement("span");
+    urlSpan.className = "failure-url";
+    urlSpan.textContent = f.url;
+    const reasonSpan = document.createElement("span");
+    reasonSpan.className = "failure-reason";
+    reasonSpan.textContent = f.error;
+    div.appendChild(urlSpan);
+    div.appendChild(reasonSpan);
+    failureListEl.appendChild(div);
+  }
+}
+
+function clearFailures() {
+  failureListEl.innerHTML = "";
+}
+
 saveDirBtn.addEventListener("click", async () => {
   const dir = sanitizeDir(parentDirInput.value.trim());
   parentDirInput.value = dir;
@@ -67,6 +89,7 @@ saveDirBtn.addEventListener("click", async () => {
 downloadAllBtn.addEventListener("click", async () => {
   const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
 
+  clearFailures();
   setStatus("Downloading...");
   downloadAllBtn.disabled = true;
 
@@ -78,10 +101,13 @@ downloadAllBtn.addEventListener("click", async () => {
 
   if (response.success) {
     const succeeded = response.results.filter((r) => r.success).length;
-    const failed = response.results.filter((r) => !r.success).length;
+    const failedResults = response.results.filter((r) => !r.success);
     let msg = `Downloaded ${succeeded} image(s)`;
-    if (failed > 0) msg += `, ${failed} failed`;
-    setStatus(msg, failed > 0 ? "error" : "success");
+    if (failedResults.length > 0) msg += `, ${failedResults.length} failed`;
+    setStatus(msg, failedResults.length > 0 ? "error" : "success");
+    if (failedResults.length > 0) {
+      showFailures(failedResults.map((r) => ({ url: r.uuid, error: r.error })));
+    }
   } else {
     setStatus(response.error || "Download failed", "error");
   }
@@ -92,6 +118,7 @@ downloadAllBtn.addEventListener("click", async () => {
 scanPageBtn.addEventListener("click", async () => {
   scanPageBtn.disabled = true;
   downloadAllBtn.disabled = true;
+  clearFailures();
   setStatus("Scanning page...");
 
   const scanResponse = await chrome.runtime.sendMessage({
@@ -107,17 +134,30 @@ scanPageBtn.addEventListener("click", async () => {
   }
 
   const total = scanResponse.total || 0;
+  const htmFound = scanResponse.htmFound || 0;
+  const scanFailures = scanResponse.failures || [];
+
+  if (scanFailures.length > 0) {
+    showFailures(scanFailures);
+  }
+
   if (total === 0) {
-    setStatus(scanResponse.message || "No images found", "success");
+    const msg = htmFound > 0
+      ? `Opened ${htmFound} HTM page(s) but found no images`
+      : (scanResponse.message || "No images found");
+    setStatus(msg, scanFailures.length > 0 ? "error" : "success");
     scanPageBtn.disabled = false;
     await refreshEntries();
     return;
   }
 
   // Automatically download all collected images
-  setStatus(`Found ${total} image(s), downloading...`);
-  const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
+  let scanMsg = `Found ${total} image(s)`;
+  if (htmFound > 0) scanMsg += ` across ${htmFound} HTM page(s)`;
+  scanMsg += ", downloading...";
+  setStatus(scanMsg);
 
+  const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
   const dlResponse = await chrome.runtime.sendMessage({
     type: "downloadAll",
     tabId: currentTabId,
@@ -126,10 +166,17 @@ scanPageBtn.addEventListener("click", async () => {
 
   if (dlResponse.success) {
     const succeeded = dlResponse.results.filter((r) => r.success).length;
-    const failed = dlResponse.results.filter((r) => !r.success).length;
+    const failedResults = dlResponse.results.filter((r) => !r.success);
     let msg = `Downloaded ${succeeded} image(s)`;
-    if (failed > 0) msg += `, ${failed} failed`;
-    setStatus(msg, failed > 0 ? "error" : "success");
+    if (htmFound > 0) msg += ` from ${htmFound} HTM page(s)`;
+    if (failedResults.length > 0) msg += `, ${failedResults.length} failed`;
+    setStatus(msg, failedResults.length > 0 ? "error" : "success");
+
+    const allFailures = [
+      ...scanFailures,
+      ...failedResults.map((r) => ({ url: r.uuid, error: r.error })),
+    ];
+    if (allFailures.length > 0) showFailures(allFailures);
   } else {
     setStatus(dlResponse.error || "Download failed", "error");
   }
@@ -143,6 +190,7 @@ clearAllBtn.addEventListener("click", async () => {
     type: "clearEntries",
     tabId: currentTabId,
   });
+  clearFailures();
   setStatus("Cleared", "success");
   setTimeout(() => setStatus(""), 2000);
   await refreshEntries();

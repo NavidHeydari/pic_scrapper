@@ -158,3 +158,35 @@ h1 {
 .status.error {
   color: #c62828;
 }
+
+.failure-list {
+  margin-top: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.failure-list:empty {
+  display: none;
+}
+
+.failure-item {
+  padding: 5px 8px;
+  background: #fff3f3;
+  border: 1px solid #fcc;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: #c62828;
+  word-break: break-all;
+}
+
+.failure-item .failure-url {
+  font-weight: 600;
+  display: block;
+  margin-bottom: 2px;
+  color: #a00;
+}
+
+.failure-item .failure-reason {
+  color: #b71c1c;
+}

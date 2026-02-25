@@ -1,5 +1,21 @@
+// Broad glob for Chrome's webRequest filter — catches all snapshot traffic
 const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/m/snapshot/*";
-const UUID_REGEX = /\/snapshot\/([0-9a-f-]+)/i;
+
+// Canonical validated download URL: versioned API path, strict RFC 4122 v1-v5 UUID, ?d=t suffix
+const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/snapshot\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
+
+// Normalise any raw BH snapshot URL into the canonical download form.
+// Returns { uuid, url } if the URL conforms, or null if it does not.
+function toDownloadUrl(rawUrl) {
+  const clean = rawUrl.split("?")[0].split("#")[0];
+  const m = clean.match(
+    /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/(v[0-9])\/media\/m\/snapshot\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?$/i
+  );
+  if (!m) return null;
+  const uuid = m[2].toLowerCase();
+  const url = `https://mbdgw.brighthorizons.com/api/parent/medias/${m[1]}/media/m/snapshot/${uuid}?d=t`;
+  return DOWNLOAD_URL_REGEX.test(url) ? { uuid, url } : null;
+}
 
 // --- Step 1: In-memory Map as primary store (no races) ---
 const tabEntries = new Map();
@@ -39,22 +55,20 @@ chrome.webRequest.onCompleted.addListener(
   (details) => {
     if (details.statusCode !== 200) return;
 
-    const match = details.url.match(UUID_REGEX);
-    if (!match) return;
+    const parsed = toDownloadUrl(details.url);
+    if (!parsed) return;
 
     const tabId = details.tabId;
     if (tabId < 0) return;
 
-    const uuid = match[1];
+    const { uuid, url } = parsed;
     const key = `tab_${tabId}`;
 
     const entries = tabEntries.get(key) || [];
 
     if (entries.some((e) => e.uuid === uuid)) return;
 
-    // Store the download URL with ?d=t appended
-    const cleanUrl = details.url.split("?")[0];
-    entries.push({ uuid, url: cleanUrl + "?d=t", timestamp: Date.now() });
+    entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
     tabEntries.set(key, entries);
     persistTab(key);
 
@@ -135,22 +149,14 @@ async function handleDownloadAll(tabId, parentDir) {
   const results = [];
 
   for (const entry of entries) {
-    const filename = `${dir}/${dateFolder}/snapshot_${entry.uuid}.jpg`;
+    const filename = `${dir}/${dateFolder}/${entry.name || `snapshot_${entry.uuid}.jpg`}`;
     try {
-      // Fetch the image as a blob first so Chrome cannot override the
-      // .jpg extension based on the server's Content-Type header.
-      const response = await fetch(entry.url);
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-      }
-      const blob = await response.blob();
-      const blobUrl = URL.createObjectURL(
-        new Blob([blob], { type: "image/jpeg" })
-      );
-
+      // Pass the validated HTTPS URL directly to chrome.downloads — no blob
+      // detour needed, and avoids URL.createObjectURL which is unavailable
+      // in a Service Worker context.
       const downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download(
-          { url: blobUrl, filename, conflictAction: "uniquify" },
+          { url: entry.url, filename, conflictAction: "uniquify", saveAs: false },
           (id) => {
             if (chrome.runtime.lastError) {
               reject(new Error(chrome.runtime.lastError.message));
@@ -161,7 +167,6 @@ async function handleDownloadAll(tabId, parentDir) {
         );
       });
 
-      URL.revokeObjectURL(blobUrl);
       results.push({ uuid: entry.uuid, downloadId, success: true });
     } catch (err) {
       results.push({ uuid: entry.uuid, success: false, error: err.message });
@@ -193,84 +198,126 @@ async function handleClearEntries(tabId) {
 }
 
 // --- DOM Scanning: inject into the active tab, find matching URLs, append ?d=t ---
-const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^"'\s]+\/media\/m\/snapshot\/[0-9a-f-]+/gi;
+// Broad pattern used during scanning — toDownloadUrl() validates and normalises afterwards
+const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^\s"'<>]+\/media\/m\/snapshot\/[{(]?[0-9a-fA-F-]+[)}]?/gi;
+const HTM_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/[^\s"'<>\r\n]+\.htm(?:[?#][^\s"'<>\r\n]*)?/gi;
+
+// Fetch an HTM page from the BH domain and extract image URLs from it
+async function fetchHtmAndExtractImages(htmUrl) {
+  try {
+    const response = await fetch(htmUrl);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    }
+    const html = await response.text();
+    const found = new Set();
+
+    // Look for snapshot UUID URLs (existing pattern)
+    const snapshotMatches = html.match(new RegExp(SCAN_URL_REGEX.source, "gi")) || [];
+    for (const u of snapshotMatches) found.add(u.split("?")[0]);
+
+    // Look for any direct .jpg/.jpeg URLs in the page
+    const imgMatches = html.match(/https?:\/\/[^\s"'<>]+\.jpe?g(?:[?#][^\s"'<>]*)?/gi) || [];
+    for (const u of imgMatches) found.add(u.split("?")[0]);
+
+    return { success: true, urls: [...found], htmUrl };
+  } catch (err) {
+    return { success: false, error: err.message, htmUrl };
+  }
+}
 
 async function handleScanTab(tabId) {
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
       func: scanDomForUrls,
-      args: [SCAN_URL_REGEX.source],
+      args: [SCAN_URL_REGEX.source, HTM_URL_REGEX.source],
     });
 
-    const foundUrls = results[0]?.result || [];
-    if (foundUrls.length === 0) {
-      return { success: true, added: 0, message: "No matching URLs found in page" };
+    const { snapshotUrls = [], htmUrls = [] } = results[0]?.result || {};
+
+    if (snapshotUrls.length === 0 && htmUrls.length === 0) {
+      return { success: true, added: 0, total: 0, message: "No matching URLs found in page" };
     }
 
     const key = `tab_${tabId}`;
     const entries = tabEntries.get(key) || [];
     let added = 0;
+    const failures = [];
 
-    for (const rawUrl of foundUrls) {
-      // Strip any existing query string and append ?d=t for download
-      const cleanUrl = rawUrl.split("?")[0];
-      const downloadUrl = cleanUrl + "?d=t";
-
-      const uuidMatch = cleanUrl.match(/\/snapshot\/([0-9a-f-]+)/i);
-      if (!uuidMatch) continue;
-
-      const uuid = uuidMatch[1];
+    // Process direct snapshot URLs found in the DOM
+    for (const rawUrl of snapshotUrls) {
+      const parsed = toDownloadUrl(rawUrl);
+      if (!parsed) continue;
+      const { uuid, url } = parsed;
       if (entries.some((e) => e.uuid === uuid)) continue;
-
-      entries.push({ uuid, url: downloadUrl, timestamp: Date.now() });
+      entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
       added++;
     }
 
-    if (added > 0) {
+    // Fetch each HTM page and extract image URLs from it
+    for (const htmUrl of htmUrls) {
+      const result = await fetchHtmAndExtractImages(htmUrl);
+      if (!result.success) {
+        failures.push({ url: htmUrl, error: result.error });
+        continue;
+      }
+      for (const imageUrl of result.urls) {
+        const parsed = toDownloadUrl(imageUrl);
+        if (!parsed) continue;
+        const { uuid, url } = parsed;
+        if (entries.some((e) => e.uuid === uuid)) continue;
+        entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
+        added++;
+      }
+    }
+
+    if (added > 0 || entries.length > 0) {
       tabEntries.set(key, entries);
       persistTab(key);
       updateBadge(tabId, entries.length);
     }
 
-    return { success: true, added, total: entries.length };
+    return {
+      success: true,
+      added,
+      total: entries.length,
+      htmFound: htmUrls.length,
+      failures,
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
 }
 
 // This function runs inside the tab's page context
-function scanDomForUrls(patternSource) {
-  const regex = new RegExp(patternSource, "gi");
-  const urls = new Set();
+function scanDomForUrls(snapshotPatternSource, htmPatternSource) {
+  const snapshotRegex = new RegExp(snapshotPatternSource, "gi");
+  const htmRegex = new RegExp(htmPatternSource, "gi");
+  const snapshotUrls = new Set();
+  const htmUrls = new Set();
 
-  // Scan all elements for src, href, data-src, data-original, poster, srcset
-  const attrs = ["src", "href", "data-src", "data-original", "poster"];
+  function scanValue(val) {
+    snapshotRegex.lastIndex = 0;
+    const sm = val.match(snapshotRegex);
+    if (sm) sm.forEach((m) => snapshotUrls.add(m));
+    htmRegex.lastIndex = 0;
+    const hm = val.match(htmRegex);
+    if (hm) hm.forEach((m) => htmUrls.add(m));
+  }
+
+  const attrs = ["src", "href", "data-src", "data-original", "poster", "srcset"];
   for (const el of document.querySelectorAll("*")) {
     for (const attr of attrs) {
       const val = el.getAttribute(attr);
-      if (val) {
-        const matches = val.match(regex);
-        if (matches) matches.forEach((m) => urls.add(m));
-      }
+      if (val) scanValue(val);
     }
-    // Check srcset (contains URLs with descriptors)
-    const srcset = el.getAttribute("srcset");
-    if (srcset) {
-      const matches = srcset.match(regex);
-      if (matches) matches.forEach((m) => urls.add(m));
-    }
-    // Check inline style for background-image urls
     const style = el.getAttribute("style");
-    if (style) {
-      const matches = style.match(regex);
-      if (matches) matches.forEach((m) => urls.add(m));
-    }
+    if (style) scanValue(style);
   }
 
-  // Also scan the full page HTML as a fallback (catches URLs in scripts, data attrs, etc.)
-  const htmlMatches = document.documentElement.outerHTML.match(regex);
-  if (htmlMatches) htmlMatches.forEach((m) => urls.add(m));
+  // Scan the full page HTML as a fallback (catches URLs in scripts, data attrs, etc.)
+  scanValue(document.documentElement.outerHTML);
 
-  return [...urls];
+  return { snapshotUrls: [...snapshotUrls], htmUrls: [...htmUrls] };
 }
