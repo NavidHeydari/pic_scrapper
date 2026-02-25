@@ -135,51 +135,20 @@ scanPageBtn.addEventListener("click", async () => {
 
   const total = scanResponse.total || 0;
   const htmFound = scanResponse.htmFound || 0;
-  const scanFailures = scanResponse.failures || [];
+  const failures = scanResponse.failures || [];
 
-  if (scanFailures.length > 0) {
-    showFailures(scanFailures);
-  }
+  if (failures.length > 0) showFailures(failures);
 
+  let msg;
   if (total === 0) {
-    const msg = htmFound > 0
+    msg = htmFound > 0
       ? `Opened ${htmFound} HTM page(s) but found no images`
       : (scanResponse.message || "No images found");
-    setStatus(msg, scanFailures.length > 0 ? "error" : "success");
-    scanPageBtn.disabled = false;
-    await refreshEntries();
-    return;
-  }
-
-  // Automatically download all collected images
-  let scanMsg = `Found ${total} image(s)`;
-  if (htmFound > 0) scanMsg += ` across ${htmFound} HTM page(s)`;
-  scanMsg += ", downloading...";
-  setStatus(scanMsg);
-
-  const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
-  const dlResponse = await chrome.runtime.sendMessage({
-    type: "downloadAll",
-    tabId: currentTabId,
-    parentDir: settings.parentDir,
-  });
-
-  if (dlResponse.success) {
-    const succeeded = dlResponse.results.filter((r) => r.success).length;
-    const failedResults = dlResponse.results.filter((r) => !r.success);
-    let msg = `Downloaded ${succeeded} image(s)`;
-    if (htmFound > 0) msg += ` from ${htmFound} HTM page(s)`;
-    if (failedResults.length > 0) msg += `, ${failedResults.length} failed`;
-    setStatus(msg, failedResults.length > 0 ? "error" : "success");
-
-    const allFailures = [
-      ...scanFailures,
-      ...failedResults.map((r) => ({ url: r.uuid, error: r.error })),
-    ];
-    if (allFailures.length > 0) showFailures(allFailures);
   } else {
-    setStatus(dlResponse.error || "Download failed", "error");
+    msg = `Found ${total} image(s)`;
+    if (htmFound > 0) msg += ` across ${htmFound} HTM page(s)`;
   }
+  setStatus(msg, failures.length > 0 ? "error" : "success");
 
   scanPageBtn.disabled = false;
   await refreshEntries();
