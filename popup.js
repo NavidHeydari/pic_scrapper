@@ -47,7 +47,7 @@ async function refreshEntries() {
   for (const entry of entries) {
     const div = document.createElement("div");
     div.className = "url-item";
-    div.textContent = entry.name || `snapshot_${entry.uuid}.jpg`;
+    div.textContent = `snapshot_${entry.uuid}.jpg`;
     urlListEl.appendChild(div);
   }
 }
@@ -141,17 +141,45 @@ scanPageBtn.addEventListener("click", async () => {
     showFailures(scanFailures);
   }
 
-  let msg;
   if (total === 0) {
-    msg = htmFound > 0
-      ? `Opened ${htmFound} HTM page(s) — no valid images found`
-      : (scanResponse.message || "No valid images found");
-  } else {
-    msg = `Found ${total} image(s)`;
-    if (htmFound > 0) msg += ` across ${htmFound} HTM page(s)`;
-    if (scanFailures.length === 0) msg += " — ready to download";
+    const msg = htmFound > 0
+      ? `Opened ${htmFound} HTM page(s) but found no images`
+      : (scanResponse.message || "No images found");
+    setStatus(msg, scanFailures.length > 0 ? "error" : "success");
+    scanPageBtn.disabled = false;
+    await refreshEntries();
+    return;
   }
-  setStatus(msg, scanFailures.length > 0 ? "error" : "success");
+
+  // Automatically download all collected images
+  let scanMsg = `Found ${total} image(s)`;
+  if (htmFound > 0) scanMsg += ` across ${htmFound} HTM page(s)`;
+  scanMsg += ", downloading...";
+  setStatus(scanMsg);
+
+  const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
+  const dlResponse = await chrome.runtime.sendMessage({
+    type: "downloadAll",
+    tabId: currentTabId,
+    parentDir: settings.parentDir,
+  });
+
+  if (dlResponse.success) {
+    const succeeded = dlResponse.results.filter((r) => r.success).length;
+    const failedResults = dlResponse.results.filter((r) => !r.success);
+    let msg = `Downloaded ${succeeded} image(s)`;
+    if (htmFound > 0) msg += ` from ${htmFound} HTM page(s)`;
+    if (failedResults.length > 0) msg += `, ${failedResults.length} failed`;
+    setStatus(msg, failedResults.length > 0 ? "error" : "success");
+
+    const allFailures = [
+      ...scanFailures,
+      ...failedResults.map((r) => ({ url: r.uuid, error: r.error })),
+    ];
+    if (allFailures.length > 0) showFailures(allFailures);
+  } else {
+    setStatus(dlResponse.error || "Download failed", "error");
+  }
 
   scanPageBtn.disabled = false;
   await refreshEntries();
