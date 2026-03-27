@@ -99,7 +99,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "downloadAll") {
-    handleDownloadAll(message.tabId, message.parentDir).then(sendResponse);
+    handleDownloadAll(message.tabId, message.parentDir, message.emailDate).then(sendResponse);
     return true;
   }
 
@@ -130,7 +130,7 @@ async function handleGetEntries(tabId) {
   return { entries };
 }
 
-async function handleDownloadAll(tabId, parentDir) {
+async function handleDownloadAll(tabId, parentDir, emailDate) {
   const key = `tab_${tabId}`;
   const entries = tabEntries.get(key) || [];
 
@@ -138,8 +138,9 @@ async function handleDownloadAll(tabId, parentDir) {
     return { success: false, error: "No images to download" };
   }
 
-  const today = new Date();
-  const dateFolder = today.toISOString().slice(0, 10);
+  const dateFolder = (emailDate && /^\d{4}-\d{2}-\d{2}$/.test(emailDate))
+    ? emailDate
+    : new Date().toISOString().slice(0, 10);
   const dir = sanitizePath(parentDir || "BrightHorizons");
   const results = [];
 
