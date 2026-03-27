@@ -86,6 +86,41 @@ saveDirBtn.addEventListener("click", async () => {
   setTimeout(() => setStatus(""), 2000);
 });
 
+// Runs inside the tab's page context — extracts a YYYY-MM-DD date from the email view
+function extractEmailDate() {
+  // 1. <time datetime="YYYY-MM-DD...">
+  for (const el of document.querySelectorAll("time[datetime]")) {
+    const m = el.getAttribute("datetime").match(/^(\d{4}-\d{2}-\d{2})/);
+    if (m) return m[1];
+  }
+
+  // 2. "Month DD, YYYY" text anywhere in the page
+  const longMonths = "January|February|March|April|May|June|July|August|September|October|November|December";
+  const shortMonths = "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec";
+  const monthPattern = new RegExp(`(${longMonths}|${shortMonths})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})`, "i");
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    const m = node.textContent.match(monthPattern);
+    if (m) {
+      const d = new Date(`${m[1]} ${m[2]}, ${m[3]}`);
+      if (!isNaN(d)) return d.toISOString().slice(0, 10);
+    }
+  }
+
+  // 3. MM/DD/YYYY numeric pattern
+  const walker2 = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  while ((node = walker2.nextNode())) {
+    const m = node.textContent.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/);
+    if (m) {
+      const d = new Date(`${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`);
+      if (!isNaN(d)) return d.toISOString().slice(0, 10);
+    }
+  }
+
+  return null;
+}
+
 downloadAllBtn.addEventListener("click", async () => {
   const settings = await chrome.storage.sync.get({ parentDir: "BrightHorizons" });
 
@@ -93,10 +128,22 @@ downloadAllBtn.addEventListener("click", async () => {
   setStatus("Downloading...");
   downloadAllBtn.disabled = true;
 
+  let emailDate = null;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: currentTabId },
+      func: extractEmailDate,
+    });
+    emailDate = results[0]?.result || null;
+  } catch (_) {
+    // scripting not available on this tab — fall back to today's date
+  }
+
   const response = await chrome.runtime.sendMessage({
     type: "downloadAll",
     tabId: currentTabId,
     parentDir: settings.parentDir,
+    emailDate,
   });
 
   if (response.success) {
