@@ -4,6 +4,31 @@ const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/
 // Canonical validated download URL: versioned API path, any media type, strict RFC 4122 v1-v5 UUID, ?d=t suffix
 const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/[^/]+\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
 
+// --- Human-like pacing ---
+
+// Resolve after a uniformly-random delay between minMs and maxMs.
+function randomDelay(minMs, maxMs) {
+  const ms = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Fisher-Yates shuffle — randomises download order so sequential UUIDs
+// are not fetched in the same order every time.
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// True when the stored filename looks like a video file.
+function isVideoEntry(entry) {
+  return /\.(mp4|webm|mov)$/i.test(entry.name || "");
+}
+
+// --- Content-type helpers ---
+
 // Map a Content-Type header value to a file extension and broad media kind.
 // Falls back to { ext: ".jpg", mediaKind: "image" } for unknown/missing types.
 function contentTypeToExtension(contentType) {
@@ -170,12 +195,30 @@ async function handleGetEntries(tabId) {
   return { entries };
 }
 
+// Delay constants for human-like download pacing (all values in ms).
+const PACE = {
+  // Think-time before the very first download (user "decides" to save).
+  THINK_MIN:        1_500,
+  THINK_MAX:        4_000,
+  // Gap between image downloads — simulates glancing at each photo.
+  IMAGE_MIN:        2_000,
+  IMAGE_MAX:        7_000,
+  // Gap after a video — simulates watching a few seconds of it.
+  VIDEO_MIN:       10_000,
+  VIDEO_MAX:       25_000,
+  // Occasional longer pause — simulates the user getting distracted.
+  DISTRACTION_MIN: 20_000,
+  DISTRACTION_MAX: 60_000,
+  // Probability (0–1) that any given inter-item gap becomes a distraction pause.
+  DISTRACTION_P:    0.12,
+};
+
 async function handleDownloadAll(tabId, parentDir, emailDate) {
   const key = `tab_${tabId}`;
   const entries = tabEntries.get(key) || [];
 
   if (entries.length === 0) {
-    return { success: false, error: "No images to download" };
+    return { success: false, error: "No files to download" };
   }
 
   const dateFolder = (emailDate && /^\d{4}-\d{2}-\d{2}$/.test(emailDate))
@@ -184,8 +227,16 @@ async function handleDownloadAll(tabId, parentDir, emailDate) {
   const dir = sanitizePath(parentDir || "BrightHorizons");
   const results = [];
 
-  for (const entry of entries) {
-    const filename = `${dir}/${dateFolder}/${entry.name || `snapshot_${entry.uuid}.jpg`}`;
+  // Randomise order so consecutive runs don't hit the same UUIDs in sequence.
+  const queue = shuffleInPlace([...entries]);
+
+  // Brief pause before first request — simulates the user clicking Save.
+  await randomDelay(PACE.THINK_MIN, PACE.THINK_MAX);
+
+  for (let i = 0; i < queue.length; i++) {
+    const entry = queue[i];
+    const filename = `${dir}/${dateFolder}/${entry.name || `media_${entry.uuid}`}`;
+
     try {
       const downloadId = await new Promise((resolve, reject) => {
         chrome.downloads.download(
@@ -199,10 +250,23 @@ async function handleDownloadAll(tabId, parentDir, emailDate) {
           }
         );
       });
-
       results.push({ uuid: entry.uuid, downloadId, success: true });
     } catch (err) {
       results.push({ uuid: entry.uuid, success: false, error: err.message });
+    }
+
+    // Pace between items — skip after the last one.
+    if (i < queue.length - 1) {
+      if (Math.random() < PACE.DISTRACTION_P) {
+        // Simulates user leaving the page briefly, scrolling elsewhere, etc.
+        await randomDelay(PACE.DISTRACTION_MIN, PACE.DISTRACTION_MAX);
+      } else if (isVideoEntry(entry)) {
+        // Simulates user watching a few seconds before moving on.
+        await randomDelay(PACE.VIDEO_MIN, PACE.VIDEO_MAX);
+      } else {
+        // Simulates user glancing at the photo.
+        await randomDelay(PACE.IMAGE_MIN, PACE.IMAGE_MAX);
+      }
     }
   }
 
@@ -279,19 +343,21 @@ async function handleScanTab(tabId) {
     let added = 0;
     const failures = [];
 
-    // Process direct media URLs found in the DOM
+    // Process direct media URLs found in the DOM.
+    // HEAD probes are staggered to avoid a burst of simultaneous requests.
     for (const rawUrl of snapshotUrls) {
       const parsed = toDownloadUrl(rawUrl);
       if (!parsed) continue;
       const { uuid, url, prefix } = parsed;
       if (entries.some((e) => e.uuid === uuid)) continue;
+      await randomDelay(300, 1_200);
       const contentType = await probeContentType(url);
       const { ext } = contentTypeToExtension(contentType);
       entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
       added++;
     }
 
-    // Fetch each HTM page and extract media URLs from it
+    // Fetch each HTM page and extract media URLs from it.
     for (const htmUrl of htmUrls) {
       const result = await fetchHtmAndExtractImages(htmUrl);
       if (!result.success) {
@@ -303,6 +369,7 @@ async function handleScanTab(tabId) {
         if (!parsed) continue;
         const { uuid, url, prefix } = parsed;
         if (entries.some((e) => e.uuid === uuid)) continue;
+        await randomDelay(300, 1_200);
         const contentType = await probeContentType(url);
         const { ext } = contentTypeToExtension(contentType);
         entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
