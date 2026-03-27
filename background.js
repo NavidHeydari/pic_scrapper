@@ -4,6 +4,37 @@ const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/
 // Canonical validated download URL: versioned API path, any media type, strict RFC 4122 v1-v5 UUID, ?d=t suffix
 const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/[^/]+\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
 
+// Map a Content-Type header value to a file extension and broad media kind.
+// Falls back to { ext: ".jpg", mediaKind: "image" } for unknown/missing types.
+function contentTypeToExtension(contentType) {
+  if (!contentType) return { ext: ".jpg", mediaKind: "image" };
+  const ct = contentType.toLowerCase().split(";")[0].trim();
+  const map = {
+    "image/jpeg":                      { ext: ".jpg",  mediaKind: "image" },
+    "image/png":                       { ext: ".png",  mediaKind: "image" },
+    "image/webp":                      { ext: ".webp", mediaKind: "image" },
+    "image/gif":                       { ext: ".gif",  mediaKind: "image" },
+    "video/mp4":                       { ext: ".mp4",  mediaKind: "video" },
+    "video/webm":                      { ext: ".webm", mediaKind: "video" },
+    "video/quicktime":                 { ext: ".mov",  mediaKind: "video" },
+    "application/x-mpegurl":          { ext: ".mp4",  mediaKind: "video" },
+    "application/vnd.apple.mpegurl":  { ext: ".mp4",  mediaKind: "video" },
+    "video/mp2t":                      { ext: ".mp4",  mediaKind: "video" },
+  };
+  return map[ct] || { ext: ".jpg", mediaKind: "image" };
+}
+
+// Issue a HEAD request to a canonical URL to retrieve its Content-Type.
+// Returns the header value string, or null if the request fails.
+async function probeContentType(url) {
+  try {
+    const response = await fetch(url, { method: "HEAD" });
+    return response.headers.get("content-type");
+  } catch {
+    return null;
+  }
+}
+
 // Normalise any raw BH media URL into the canonical download form.
 // Returns { uuid, url, prefix } if the URL conforms, or null if it does not.
 // Handles snapshot, observations, and any other media type under /media/m/.
@@ -61,6 +92,11 @@ chrome.webRequest.onCompleted.addListener(
     const tabId = details.tabId;
     if (tabId < 0) return;
 
+    const contentTypeHeader = details.responseHeaders?.find(
+      (h) => h.name.toLowerCase() === "content-type"
+    );
+    const { ext } = contentTypeToExtension(contentTypeHeader?.value);
+
     const { uuid, url, prefix } = parsed;
     const key = `tab_${tabId}`;
 
@@ -68,13 +104,14 @@ chrome.webRequest.onCompleted.addListener(
 
     if (entries.some((e) => e.uuid === uuid)) return;
 
-    entries.push({ uuid, url, name: `${prefix}_${uuid}.jpg`, timestamp: Date.now() });
+    entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
     tabEntries.set(key, entries);
     persistTab(key);
 
     updateBadge(tabId, entries.length);
   },
-  { urls: [URL_PATTERN] }
+  { urls: [URL_PATTERN] },
+  ["responseHeaders"]
 );
 
 function updateBadge(tabId, count) {
@@ -242,29 +279,33 @@ async function handleScanTab(tabId) {
     let added = 0;
     const failures = [];
 
-    // Process direct snapshot URLs found in the DOM
+    // Process direct media URLs found in the DOM
     for (const rawUrl of snapshotUrls) {
       const parsed = toDownloadUrl(rawUrl);
       if (!parsed) continue;
       const { uuid, url, prefix } = parsed;
       if (entries.some((e) => e.uuid === uuid)) continue;
-      entries.push({ uuid, url, name: `${prefix}_${uuid}.jpg`, timestamp: Date.now() });
+      const contentType = await probeContentType(url);
+      const { ext } = contentTypeToExtension(contentType);
+      entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
       added++;
     }
 
-    // Fetch each HTM page and extract image URLs from it
+    // Fetch each HTM page and extract media URLs from it
     for (const htmUrl of htmUrls) {
       const result = await fetchHtmAndExtractImages(htmUrl);
       if (!result.success) {
         failures.push({ url: htmUrl, error: result.error });
         continue;
       }
-      for (const imageUrl of result.urls) {
-        const parsed = toDownloadUrl(imageUrl);
+      for (const mediaUrl of result.urls) {
+        const parsed = toDownloadUrl(mediaUrl);
         if (!parsed) continue;
-        const { uuid, url } = parsed;
+        const { uuid, url, prefix } = parsed;
         if (entries.some((e) => e.uuid === uuid)) continue;
-        entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
+        const contentType = await probeContentType(url);
+        const { ext } = contentTypeToExtension(contentType);
+        entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
         added++;
       }
     }

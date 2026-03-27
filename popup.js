@@ -47,7 +47,7 @@ async function refreshEntries() {
   for (const entry of entries) {
     const div = document.createElement("div");
     div.className = "url-item";
-    div.textContent = entry.name || `snapshot_${entry.uuid}.jpg`;
+    div.textContent = entry.name || entry.uuid;
     urlListEl.appendChild(div);
   }
 }
@@ -149,7 +149,7 @@ downloadAllBtn.addEventListener("click", async () => {
   if (response.success) {
     const succeeded = response.results.filter((r) => r.success).length;
     const failedResults = response.results.filter((r) => !r.success);
-    let msg = `Downloaded ${succeeded} image(s)`;
+    let msg = `Downloaded ${succeeded} file(s)`;
     if (failedResults.length > 0) msg += `, ${failedResults.length} failed`;
     setStatus(msg, failedResults.length > 0 ? "error" : "success");
     if (failedResults.length > 0) {
@@ -189,10 +189,10 @@ scanPageBtn.addEventListener("click", async () => {
   let msg;
   if (total === 0) {
     msg = htmFound > 0
-      ? `Opened ${htmFound} HTM page(s) but found no images`
-      : (scanResponse.message || "No images found");
+      ? `Opened ${htmFound} HTM page(s) but found no media`
+      : (scanResponse.message || "No media found");
   } else {
-    msg = `Found ${total} image(s)`;
+    msg = `Found ${total} file(s)`;
     if (htmFound > 0) msg += ` across ${htmFound} HTM page(s)`;
   }
   setStatus(msg, failures.length > 0 ? "error" : "success");

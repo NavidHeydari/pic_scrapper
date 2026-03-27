@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Bright Horizons Picture Scraper",
   "version": "1.0.0",
-  "description": "Captures and downloads snapshot images from the Bright Horizons parent portal.",
+  "description": "Captures and downloads photos and videos from the Bright Horizons parent portal.",
   "permissions": [
     "webRequest",
     "downloads",
