@@ -1,19 +1,22 @@
-// Broad glob for Chrome's webRequest filter — catches all snapshot traffic
-const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/m/snapshot/*";
+// Broad glob for Chrome's webRequest filter — catches all media traffic under /media/m/
+const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/m/*";
 
-// Canonical validated download URL: versioned API path, strict RFC 4122 v1-v5 UUID, ?d=t suffix
-const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/snapshot\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
+// Canonical validated download URL: versioned API path, any media type, strict RFC 4122 v1-v5 UUID, ?d=t suffix
+const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/[^/]+\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
 
-// Normalise any raw BH snapshot URL into the canonical download form.
-// Returns { uuid, url } if the URL conforms, or null if it does not.
+// Normalise any raw BH media URL into the canonical download form.
+// Returns { uuid, url, prefix } if the URL conforms, or null if it does not.
+// Handles snapshot, observations, and any other media type under /media/m/.
 function toDownloadUrl(rawUrl) {
   const clean = rawUrl.split("?")[0].split("#")[0];
   const m = clean.match(
-    /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/(v[0-9])\/media\/m\/snapshot\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?$/i
+    /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/(v[0-9])\/media\/m\/([^/]+)\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?$/i
   );
   if (!m) return null;
-  const uuid = m[2].toLowerCase();
-  return { uuid, url: `https://mbdgw.brighthorizons.com/api/parent/medias/${m[1]}/media/m/snapshot/${uuid}?d=t` };
+  const [, version, type, rawUuid] = m;
+  const uuid = rawUuid.toLowerCase();
+  const prefix = type.replace(/[^a-z0-9_-]/gi, "_").toLowerCase();
+  return { uuid, url: `https://mbdgw.brighthorizons.com/api/parent/medias/${version}/media/m/${type}/${uuid}?d=t`, prefix };
 }
 
 const tabEntries = new Map();
@@ -58,14 +61,14 @@ chrome.webRequest.onCompleted.addListener(
     const tabId = details.tabId;
     if (tabId < 0) return;
 
-    const { uuid, url } = parsed;
+    const { uuid, url, prefix } = parsed;
     const key = `tab_${tabId}`;
 
     const entries = tabEntries.get(key) || [];
 
     if (entries.some((e) => e.uuid === uuid)) return;
 
-    entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
+    entries.push({ uuid, url, name: `${prefix}_${uuid}.jpg`, timestamp: Date.now() });
     tabEntries.set(key, entries);
     persistTab(key);
 
@@ -192,7 +195,8 @@ async function handleClearEntries(tabId) {
 
 // --- DOM Scanning: inject into the active tab, find matching URLs, append ?d=t ---
 // Broad pattern used during scanning — toDownloadUrl() validates and normalises afterwards
-const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^\s"'<>]+\/media\/m\/snapshot\/[{(]?[0-9a-fA-F-]+[)}]?/gi;
+// Matches snapshot, observations, and any other media type under /media/m/
+const SCAN_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/[^\s"'<>]+\/media\/m\/[^\s"'<>/]+\/[{(]?[0-9a-fA-F-]+[)}]?/gi;
 const HTM_URL_REGEX = /https:\/\/mbdgw\.brighthorizons\.com\/[^\s"'<>\r\n]+\.htm(?:[?#][^\s"'<>\r\n]*)?/gi;
 
 // Fetch an HTM page from the BH domain and extract image URLs from it
@@ -242,9 +246,9 @@ async function handleScanTab(tabId) {
     for (const rawUrl of snapshotUrls) {
       const parsed = toDownloadUrl(rawUrl);
       if (!parsed) continue;
-      const { uuid, url } = parsed;
+      const { uuid, url, prefix } = parsed;
       if (entries.some((e) => e.uuid === uuid)) continue;
-      entries.push({ uuid, url, name: `snapshot_${uuid}.jpg`, timestamp: Date.now() });
+      entries.push({ uuid, url, name: `${prefix}_${uuid}.jpg`, timestamp: Date.now() });
       added++;
     }
 

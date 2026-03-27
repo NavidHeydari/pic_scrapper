@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Chrome extension (Manifest V3) that captures and batch-downloads snapshot images from the Bright Horizons parent portal (`mbdgw.brighthorizons.com`). It passively intercepts image requests as the user browses, tracks them per tab, and lets the user download them all into a date-stamped folder.
+A Chrome extension (Manifest V3) that captures and batch-downloads media images from the Bright Horizons parent portal (`mbdgw.brighthorizons.com`). It passively intercepts image requests as the user browses, tracks them per tab, and lets the user download them all into a date-stamped folder. Supported media types include snapshots, observations, and any other media type served under the `/api/parent/medias/*/media/m/*` path.
 
 ## Architecture
 
@@ -23,10 +23,10 @@ A Chrome extension (Manifest V3) that captures and batch-downloads snapshot imag
 ### Download folder layout
 
 ```
-Downloads/<parentDir>/<YYYY-MM-DD>/<snapshot_<uuid>.jpg>
+Downloads/<parentDir>/<YYYY-MM-DD>/<type>_<uuid>.jpg
 ```
 
-The date comes from the email/page being viewed (extracted from the tab DOM). Falls back to today's date if no date is found on the page.
+Where `<type>` is the media type extracted from the URL (e.g. `snapshot`, `observations`). The date comes from the email/page being viewed (extracted from the tab DOM). Falls back to today's date if no date is found on the page.
 
 ### State management
 
@@ -37,6 +37,9 @@ The date comes from the email/page being viewed (extracted from the tab DOM). Fa
 ## Key Constraints
 
 - Host permissions are narrowly scoped to `https://mbdgw.brighthorizons.com/*`
+- `URL_PATTERN` (webRequest filter) uses `…/media/m/*` to catch all media types broadly
+- `toDownloadUrl()` validates the URL strictly (versioned API path `v[0-9]`, RFC 4122 v1–v5 UUID) and returns a `prefix` derived from the media type for use in the filename
+- `SCAN_URL_REGEX` matches any media type segment under `/media/m/` during DOM scanning
 - UUIDs are strictly validated against RFC 4122 v1–v5 format
 - `sanitizePath()` prevents path traversal and illegal filename characters
 - Extension uses `scripting` + `activeTab` to inject scripts for DOM scanning and date extraction
