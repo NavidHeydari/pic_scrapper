@@ -4,22 +4,10 @@ const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/
 // Canonical validated download URL: versioned API path, any media type, strict RFC 4122 v1-v5 UUID, ?d=t suffix
 const DOWNLOAD_URL_REGEX = /^https:\/\/mbdgw\.brighthorizons\.com\/api\/parent\/medias\/v[0-9]\/media\/m\/[^/]+\/[{(]?([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})[)}]?\?d=t$/;
 
-// --- Human-like pacing ---
-
-// Resolve after a uniformly-random delay between minMs and maxMs.
+// Resolve after a uniformly-random delay between minMs and maxMs (used during scan probing).
 function randomDelay(minMs, maxMs) {
   const ms = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Fisher-Yates shuffle — randomises download order so sequential UUIDs
-// are not fetched in the same order every time.
-function shuffleInPlace(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
 }
 
 // True when the stored filename looks like a video file.
@@ -107,6 +95,53 @@ function sanitizePath(dir) {
     || "BrightHorizons";            // fallback if empty after sanitization
 }
 
+// --- Download tracking ---
+
+// activeDownloads: chrome downloadId → { tabId, uuid }
+const activeDownloads = new Map();
+
+// downloadStatus: tabKey → Map<uuid, 'downloading'|'done'|'failed'>
+const downloadStatus = new Map();
+
+// Notify the popup of a download status change. Swallows errors if popup is closed.
+function notifyProgress(tabId, uuid, status) {
+  chrome.runtime.sendMessage({ type: "downloadProgress", tabId, uuid, status }).catch(() => {});
+}
+
+// Listen for Chrome download state changes and relay completion to the popup.
+chrome.downloads.onChanged.addListener((delta) => {
+  if (!activeDownloads.has(delta.id)) return;
+  const { tabId, uuid } = activeDownloads.get(delta.id);
+
+  let newStatus = null;
+  if (delta.state?.current === "complete") {
+    newStatus = "done";
+    activeDownloads.delete(delta.id);
+
+    // Remove the completed entry so it disappears from the list on next refresh.
+    const key = `tab_${tabId}`;
+    const entries = tabEntries.get(key) || [];
+    const remaining = entries.filter((e) => e.uuid !== uuid);
+    if (remaining.length > 0) {
+      tabEntries.set(key, remaining);
+    } else {
+      tabEntries.delete(key);
+    }
+    persistTab(key);
+    updateBadge(tabId, remaining.length);
+  } else if (delta.state?.current === "interrupted") {
+    newStatus = "failed";
+    activeDownloads.delete(delta.id);
+  }
+
+  if (newStatus) {
+    const key = `tab_${tabId}`;
+    if (!downloadStatus.has(key)) downloadStatus.set(key, new Map());
+    downloadStatus.get(key).set(uuid, newStatus);
+    notifyProgress(tabId, uuid, newStatus);
+  }
+});
+
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     if (details.statusCode !== 200) return;
@@ -177,6 +212,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleScanTab(message.tabId).then(sendResponse);
     return true;
   }
+
+  if (message.type === "getDownloadStatus") {
+    const key = `tab_${message.tabId}`;
+    const statusMap = downloadStatus.get(key);
+    const status = {};
+    if (statusMap) {
+      for (const [uuid, s] of statusMap) status[uuid] = s;
+    }
+    sendResponse({ status });
+    return true;
+  }
 });
 
 async function handleGetEntries(tabId) {
@@ -195,23 +241,49 @@ async function handleGetEntries(tabId) {
   return { entries };
 }
 
-// Delay constants for human-like download pacing (all values in ms).
+// Pacing constants — controls how we stagger download *requests* (not completions).
+// Downloads themselves all run in parallel inside Chrome; these delays only throttle
+// how quickly we hand new requests to Chrome, mimicking a human saving files one by one.
 const PACE = {
-  // Think-time before the very first download (user "decides" to save).
-  THINK_MIN:        1_500,
-  THINK_MAX:        4_000,
-  // Gap between image downloads — simulates glancing at each photo.
-  IMAGE_MIN:        2_000,
-  IMAGE_MAX:        7_000,
-  // Gap after a video — simulates watching a few seconds of it.
-  VIDEO_MIN:       10_000,
-  VIDEO_MAX:       25_000,
-  // Occasional longer pause — simulates the user getting distracted.
-  DISTRACTION_MIN: 20_000,
-  DISTRACTION_MAX: 60_000,
-  // Probability (0–1) that any given inter-item gap becomes a distraction pause.
-  DISTRACTION_P:    0.12,
+  THINK_MIN:  500,    // pause before the very first request
+  THINK_MAX: 1_500,
+  IMAGE_MIN:  300,    // gap between consecutive image requests
+  IMAGE_MAX:  900,
+  VIDEO_MIN:  600,    // slightly longer gap before each video request
+  VIDEO_MAX: 1_800,
+  BATCH_MIN:  800,    // pause when switching from images to videos
+  BATCH_MAX: 1_500,
 };
+
+// Initiate a single download. Returns immediately after Chrome accepts the request.
+// Completion (or interruption) is reported asynchronously via chrome.downloads.onChanged.
+async function startDownload(entry, tabId, dir, dateFolder, statusMap) {
+  const filename = `${dir}/${dateFolder}/${entry.name || `media_${entry.uuid}`}`;
+  statusMap.set(entry.uuid, "downloading");
+  notifyProgress(tabId, entry.uuid, "downloading");
+
+  try {
+    const downloadId = await new Promise((resolve, reject) => {
+      chrome.downloads.download(
+        { url: entry.url, filename, conflictAction: "uniquify", saveAs: false },
+        (id) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(id);
+          }
+        }
+      );
+    });
+    activeDownloads.set(downloadId, { tabId, uuid: entry.uuid });
+    return { uuid: entry.uuid, downloadId, success: true };
+  } catch (err) {
+    // Immediate failure — update status and notify popup now; won't appear via onChanged.
+    statusMap.set(entry.uuid, "failed");
+    notifyProgress(tabId, entry.uuid, "failed");
+    return { uuid: entry.uuid, success: false, error: err.message };
+  }
+}
 
 async function handleDownloadAll(tabId, parentDir, emailDate) {
   const key = `tab_${tabId}`;
@@ -225,69 +297,55 @@ async function handleDownloadAll(tabId, parentDir, emailDate) {
     ? emailDate
     : new Date().toISOString().slice(0, 10);
   const dir = sanitizePath(parentDir || "BrightHorizons");
+
+  // Separate images and videos — images download first.
+  const images = entries.filter((e) => !isVideoEntry(e));
+  const videos = entries.filter((e) => isVideoEntry(e));
+
+  if (!downloadStatus.has(key)) downloadStatus.set(key, new Map());
+  const statusMap = downloadStatus.get(key);
+
+  // Stagger download *requests* with human-like gaps so we don't hammer the server.
+  // Chrome runs the actual downloads in parallel; we only throttle when we hand each
+  // request to Chrome. Images are initiated first, then videos.
   const results = [];
 
-  // Randomise order so consecutive runs don't hit the same UUIDs in sequence.
-  const queue = shuffleInPlace([...entries]);
-
-  // Brief pause before first request — simulates the user clicking Save.
+  // Brief think-time before the first request.
   await randomDelay(PACE.THINK_MIN, PACE.THINK_MAX);
 
-  for (let i = 0; i < queue.length; i++) {
-    const entry = queue[i];
-    const filename = `${dir}/${dateFolder}/${entry.name || `media_${entry.uuid}`}`;
-
-    try {
-      const downloadId = await new Promise((resolve, reject) => {
-        chrome.downloads.download(
-          { url: entry.url, filename, conflictAction: "uniquify", saveAs: false },
-          (id) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else {
-              resolve(id);
-            }
-          }
-        );
-      });
-      results.push({ uuid: entry.uuid, downloadId, success: true });
-    } catch (err) {
-      results.push({ uuid: entry.uuid, success: false, error: err.message });
-    }
-
-    // Pace between items — skip after the last one.
-    if (i < queue.length - 1) {
-      if (Math.random() < PACE.DISTRACTION_P) {
-        // Simulates user leaving the page briefly, scrolling elsewhere, etc.
-        await randomDelay(PACE.DISTRACTION_MIN, PACE.DISTRACTION_MAX);
-      } else if (isVideoEntry(entry)) {
-        // Simulates user watching a few seconds before moving on.
-        await randomDelay(PACE.VIDEO_MIN, PACE.VIDEO_MAX);
-      } else {
-        // Simulates user glancing at the photo.
-        await randomDelay(PACE.IMAGE_MIN, PACE.IMAGE_MAX);
-      }
-    }
+  for (let i = 0; i < images.length; i++) {
+    if (i > 0) await randomDelay(PACE.IMAGE_MIN, PACE.IMAGE_MAX);
+    results.push(await startDownload(images[i], tabId, dir, dateFolder, statusMap));
   }
 
-  const failedUuids = new Set(
-    results.filter((r) => !r.success).map((r) => r.uuid)
-  );
-  const remaining = entries.filter((e) => failedUuids.has(e.uuid));
-
-  if (remaining.length > 0) {
-    tabEntries.set(key, remaining);
-  } else {
-    tabEntries.delete(key);
+  if (images.length > 0 && videos.length > 0) {
+    await randomDelay(PACE.BATCH_MIN, PACE.BATCH_MAX);
   }
-  persistTab(key);
-  updateBadge(tabId, remaining.length);
 
-  return { success: true, results };
+  for (let i = 0; i < videos.length; i++) {
+    if (i > 0) await randomDelay(PACE.VIDEO_MIN, PACE.VIDEO_MAX);
+    results.push(await startDownload(videos[i], tabId, dir, dateFolder, statusMap));
+  }
+
+  return {
+    success: true,
+    initiated: entries.length,
+    results,
+  };
 }
 
 async function handleClearEntries(tabId) {
   const key = `tab_${tabId}`;
+
+  // Cancel any in-flight Chrome downloads for this tab.
+  for (const [downloadId, info] of activeDownloads) {
+    if (info.tabId === tabId) {
+      chrome.downloads.cancel(downloadId, () => {});
+      activeDownloads.delete(downloadId);
+    }
+  }
+
+  downloadStatus.delete(key);
   tabEntries.delete(key);
   persistTab(key);
   updateBadge(tabId, 0);

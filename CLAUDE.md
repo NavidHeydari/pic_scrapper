@@ -2,7 +2,7 @@
 
 ## What This Is
 
-A Chrome extension (Manifest V3) that captures and batch-downloads media images from the Bright Horizons parent portal (`mbdgw.brighthorizons.com`). It passively intercepts image requests as the user browses, tracks them per tab, and lets the user download them all into a date-stamped folder. Supported media types include snapshots, observations, and any other media type served under the `/api/parent/medias/*/media/m/*` path.
+A Chrome extension (Manifest V3) that captures and batch-downloads media (images and videos) from the Bright Horizons parent portal (`mbdgw.brighthorizons.com`). It passively intercepts media requests as the user browses, tracks them per tab, and lets the user download them all into a date-stamped folder. Supported media types include snapshots, observations, and any other media type served under the `/api/parent/medias/*/media/m/*` path.
 
 ## Architecture
 
@@ -12,37 +12,65 @@ A Chrome extension (Manifest V3) that captures and batch-downloads media images 
 | `popup.html/js/css` | Extension popup UI |
 | `options.html/js` | Settings page (save directory name) |
 | `manifest.json` | Chrome MV3 manifest |
+| `generate_icons.py` | Generates `icons/icon{16,48,128}.png` (pure Python, no deps) |
+| `diagram.mmd` | Architecture diagram (Mermaid) |
 
 ### Message flow (popup → background)
 
-- `getEntries` — returns captured entries for the current tab
-- `downloadAll` — triggers batch download; accepts `tabId`, `parentDir`, `emailDate`
-- `clearEntries` — resets capture list for current tab
-- `scanTab` — injects `scanDomForUrls` into the page to find image URLs
+- `getEntries` → `{ entries }` — returns captured entries for the current tab
+- `downloadAll` → `{ success, results }` — triggers batch download; accepts `tabId`, `parentDir`, `emailDate`
+- `clearEntries` → `{ success }` — resets capture list for current tab
+- `scanTab` → `{ success, added, total, htmFound, failures }` — injects `scanDomForUrls` into the page to find media URLs, also fetches linked `.htm` pages to extract additional URLs
+
+### Scan flow (two-pass)
+
+1. `scanDomForUrls` (injected into tab) scans the DOM HTML for two patterns:
+   - `SCAN_URL_REGEX` — BH media API URLs (`/media/m/…`)
+   - `HTM_URL_REGEX` — BH `.htm` page URLs
+2. Direct media URLs are HEAD-probed to determine content-type/extension.
+3. Each `.htm` URL is fetched server-side (from the service worker) via `fetchHtmAndExtractImages`, which extracts media URLs from the page HTML (both BH API URLs and direct `.jpg`/`.jpeg` URLs).
+4. Newly found entries are de-duped by UUID, then appended to the tab's entry list.
 
 ### Download folder layout
 
 ```
-Downloads/<parentDir>/<YYYY-MM-DD>/<type>_<uuid>.jpg
+Downloads/<parentDir>/<YYYY-MM-DD>/<type>_<uuid>.<ext>
 ```
 
-Where `<type>` is the media type extracted from the URL (e.g. `snapshot`, `observations`). The date comes from the email/page being viewed (extracted from the tab DOM). Falls back to today's date if no date is found on the page.
+- `<type>` — media type extracted from the URL (e.g. `snapshot`, `observations`)
+- `<ext>` — file extension derived from the `Content-Type` response header (`.jpg`, `.png`, `.webp`, `.gif`, `.mp4`, `.webm`, `.mov`); falls back to `.jpg`
+- The date is extracted from the tab DOM (three strategies: `<time datetime>`, "Month DD, YYYY" text, MM/DD/YYYY numeric). Falls back to today's date.
 
 ### State management
 
-- `tabEntries` (`Map<string, Entry[]>`) — in-memory, keyed by `"tab_<tabId>"`
+- `tabEntries` (`Map<string, Entry[]>`) — in-memory, keyed by `"tab_<tabId>"`; each entry has `{ uuid, url, name, timestamp }`
 - `chrome.storage.session` — persists entries across service worker restarts
 - `chrome.storage.sync` — persists `parentDir` setting
+
+### Human-like download pacing (`PACE` constants)
+
+Downloads are shuffled (Fisher-Yates) and spaced with random delays to avoid request bursts:
+
+| Constant | Range | Purpose |
+|---|---|---|
+| `THINK_MIN/MAX` | 1.5–4 s | Pause before first download |
+| `IMAGE_MIN/MAX` | 2–7 s | Gap between image downloads |
+| `VIDEO_MIN/MAX` | 10–25 s | Longer gap after video entries |
+| `DISTRACTION_MIN/MAX` | 20–60 s | Occasional long pause (12% probability) |
+
+HEAD probes during scan are also staggered (300–1200 ms each).
 
 ## Key Constraints
 
 - Host permissions are narrowly scoped to `https://mbdgw.brighthorizons.com/*`
 - `URL_PATTERN` (webRequest filter) uses `…/media/m/*` to catch all media types broadly
-- `toDownloadUrl()` validates the URL strictly (versioned API path `v[0-9]`, RFC 4122 v1–v5 UUID) and returns a `prefix` derived from the media type for use in the filename
+- `toDownloadUrl()` validates the URL strictly (versioned API path `v[0-9]`, RFC 4122 v1–v5 UUID) and returns `{ uuid, url, prefix }` — `prefix` is the sanitized media type used as the filename prefix
 - `SCAN_URL_REGEX` matches any media type segment under `/media/m/` during DOM scanning
-- UUIDs are strictly validated against RFC 4122 v1–v5 format
-- `sanitizePath()` prevents path traversal and illegal filename characters
+- `HTM_URL_REGEX` matches `.htm` page URLs on the BH domain during DOM scanning
+- UUIDs are strictly validated against RFC 4122 v1–v5 format in `toDownloadUrl()`
+- `sanitizePath()` (background) and `sanitizeDir()` (popup/options) both prevent path traversal and illegal filename characters; fall back to `"BrightHorizons"` if empty
 - Extension uses `scripting` + `activeTab` to inject scripts for DOM scanning and date extraction
+- Badge on the extension icon shows the live count of captured items for the active tab
 
 ## Development Notes
 

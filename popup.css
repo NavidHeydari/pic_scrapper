@@ -78,15 +78,74 @@ h1 {
 }
 
 .url-item {
-  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
   border-bottom: 1px solid #f0f0f0;
   font-size: 11px;
   word-break: break-all;
   color: #555;
+  transition: background 0.2s;
 }
 
 .url-item:last-child {
   border-bottom: none;
+}
+
+.url-item.downloading {
+  background: #fff8e1;
+  color: #e65100;
+}
+
+.url-item.done {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.url-item.failed {
+  background: #ffebee;
+  color: #c62828;
+}
+
+.media-badge {
+  flex-shrink: 0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+
+.media-badge.image {
+  background: #e8eaf6;
+  color: #3949ab;
+}
+
+.media-badge.video {
+  background: #f3e5f5;
+  color: #6a1b9a;
+}
+
+.url-item.downloading .media-badge.image,
+.url-item.done .media-badge.image,
+.url-item.failed .media-badge.image {
+  background: rgba(0,0,0,0.08);
+  color: inherit;
+}
+
+.url-item.downloading .media-badge.video,
+.url-item.done .media-badge.video,
+.url-item.failed .media-badge.video {
+  background: rgba(0,0,0,0.08);
+  color: inherit;
+}
+
+.entry-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .url-list:empty {
