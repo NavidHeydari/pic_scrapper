@@ -1,18 +1,20 @@
 # BH Picture Scraper
 
-A Chrome extension (Manifest V3) that automatically captures and batch-downloads snapshot images from the Bright Horizons parent portal.
+A Chrome extension (Manifest V3) that automatically captures and batch-downloads media images (snapshots, observations, and more) from the Bright Horizons parent portal.
 
 ## How It Works
 
-1. The extension monitors network requests to the BH snapshot API using `chrome.webRequest`.
-2. When you browse photo pages on the Bright Horizons portal, captured images are tracked per tab and shown as a badge count on the extension icon.
+1. The extension monitors network requests to the BH media API using `chrome.webRequest`, covering all media types under `/api/parent/medias/*/media/m/*` (snapshots, observations, and any others).
+2. When you browse photo or observation pages on the Bright Horizons portal, captured images are tracked per tab and shown as a badge count on the extension icon.
 3. Open the popup to see captured filenames, then click **Download All** to save them in one go.
 
 ## Features
 
 - **Automatic capture** — images are detected as you browse, no manual action needed.
+- **All media types** — captures snapshots, observations, and any other media type served under the BH media API.
 - **Per-tab tracking** — each tab maintains its own capture list.
 - **Batch download** — downloads all captured images to `Downloads/<folder>/<YYYY-MM-DD>/`.
+- **Smart filenames** — files are named `<type>_<uuid>.jpg` (e.g. `snapshot_…`, `observations_…`) so different media types stay identifiable.
 - **Configurable save folder** — set a custom parent directory from the popup or options page.
 - **Retry on failure** — failed downloads are kept so you can retry without losing progress.
 - **Path sanitization** — directory input is validated to prevent path traversal and illegal characters.
@@ -47,7 +49,7 @@ icons/           — Extension icons (16, 48, 128px)
 
 | Permission | Reason |
 |---|---|
-| `webRequest` | Intercept BH snapshot image requests |
+| `webRequest` | Intercept BH media image requests (snapshots, observations, etc.) |
 | `downloads` | Save images to the downloads folder |
 | `storage` | Persist settings and capture state across service worker restarts |
 | `host_permissions` | Scoped to `https://mbdgw.brighthorizons.com/*` only |
