@@ -6,6 +6,7 @@ const urlListEl = document.getElementById("urlList");
 const scanPageBtn = document.getElementById("scanPage");
 const downloadAllBtn = document.getElementById("downloadAll");
 const clearAllBtn = document.getElementById("clearAll");
+const refreshExpiredBtn = document.getElementById("refreshExpired");
 const statusEl = document.getElementById("status");
 const failureListEl = document.getElementById("failureList");
 
@@ -13,6 +14,20 @@ let currentTabId = null;
 
 // Number of downloads still in flight (decremented on done/failed).
 let pendingCount = 0;
+
+// Expired photos found by the last "Find Expired Photos" click, awaiting confirmation to refresh.
+let expiredFound = null;
+
+// Send a message to the service worker. Resolves to { success: false, error } instead of rejecting,
+// so an unreachable worker (crashed, restarted, or extension reloaded) can't leave the popup stuck.
+async function sendToWorker(message) {
+  try {
+    const response = await chrome.runtime.sendMessage(message);
+    return response || { success: false, error: "No response from the extension. Reload it in chrome://extensions and try again." };
+  } catch (err) {
+    return { success: false, error: `Lost contact with the extension (${err.message}). Reload it in chrome://extensions and try again.` };
+  }
+}
 
 function sanitizeDir(raw) {
   return raw
@@ -30,6 +45,10 @@ async function init() {
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab.id;
+
+  // Reopened while a refresh run is in progress for this tab — show it instead of an idle button.
+  const { status: refresh } = (await sendToWorker({ type: "getRefreshStatus" })) || {};
+  if (refresh?.running && refresh.tabId === currentTabId) showRefreshRunning(refresh.done, refresh.total);
 
   await refreshEntries();
 }
@@ -142,6 +161,16 @@ function onAllDownloadsFinished() {
 // Listen for per-download progress notifications from the service worker.
 // This fires even while the popup is open after a tab switch.
 chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === "refreshProgress" && message.tabId === currentTabId) {
+    setStatus(message.status === "opening"
+      ? `Opening photo ${message.done + 1}/${message.total} in a background tab...`
+      : `Requested ${message.done}/${message.total} refresh(es)...`);
+    return;
+  }
+  if (message.type === "refreshDone" && message.tabId === currentTabId) {
+    showRefreshSummary(message);
+    return;
+  }
   if (message.type !== "downloadProgress" || message.tabId !== currentTabId) return;
 
   const { uuid, status } = message;
@@ -306,11 +335,81 @@ scanPageBtn.addEventListener("click", async () => {
     msg = `Found ${total} file(s)`;
     if (htmFound > 0) msg += ` across ${htmFound} HTM page(s)`;
   }
+  if (scanResponse.expired > 0) {
+    msg += ` · ${scanResponse.expired} expired (use Find Expired Photos)`;
+  }
   setStatus(msg, failures.length > 0 ? "error" : "success");
 
   scanPageBtn.disabled = false;
   await refreshEntries();
 });
+
+function resetRefreshButton() {
+  expiredFound = null;
+  refreshExpiredBtn.textContent = "Find Expired Photos";
+  refreshExpiredBtn.classList.remove("confirm");
+  refreshExpiredBtn.disabled = false;
+}
+
+// Two-step: the first click only finds expired photos; the second requests the refreshes,
+// since each refresh makes Bright Horizons send a new email.
+refreshExpiredBtn.addEventListener("click", async () => {
+  refreshExpiredBtn.disabled = true;
+  clearFailures();
+
+  if (!expiredFound) {
+    setStatus("Checking email images...");
+    const found = await sendToWorker({ type: "findExpired", tabId: currentTabId });
+    if (!found.success) {
+      setStatus(found.error || "Could not check this page", "error");
+      resetRefreshButton();
+      return;
+    }
+
+    const already = found.alreadyRequested > 0 ? ` (${found.alreadyRequested} already requested)` : "";
+    if (found.expired.length === 0) {
+      setStatus(`No expired photos to refresh${already}`, "success");
+      resetRefreshButton();
+      return;
+    }
+
+    expiredFound = found.expired;
+    setStatus(`${expiredFound.length} expired photo(s)${already}. Each refresh sends you a new email.`);
+    refreshExpiredBtn.textContent = `Request ${expiredFound.length} Refresh(es)`;
+    refreshExpiredBtn.classList.add("confirm");
+    refreshExpiredBtn.disabled = false;
+    return;
+  }
+
+  setStatus("Starting refresh...");
+  const response = await sendToWorker({ type: "refreshExpired", tabId: currentTabId });
+  if (!response.success) {
+    setStatus(response.error || "Refresh failed", "error");
+    resetRefreshButton();
+    return;
+  }
+
+  // The run continues in the service worker; progress and the outcome arrive as messages.
+  showRefreshRunning(0, response.total);
+});
+
+// Disable the button while a refresh run is in progress (also used when the popup reopens mid-run).
+function showRefreshRunning(done, total) {
+  expiredFound = null;
+  refreshExpiredBtn.textContent = "Refreshing...";
+  refreshExpiredBtn.classList.remove("confirm");
+  refreshExpiredBtn.disabled = true;
+  setStatus(`Requested ${done}/${total} refresh(es)...`);
+}
+
+function showRefreshSummary(summary) {
+  resetRefreshButton();
+  let msg = `Requested ${summary.requested} refresh(es) — check your email`;
+  if (summary.available > 0) msg += `, ${summary.available} already available`;
+  if (summary.failed > 0) msg += `, ${summary.failed} failed`;
+  setStatus(msg, summary.failed > 0 ? "error" : "success");
+  showFailures(summary.results.filter((r) => r.status === "failed"));
+}
 
 clearAllBtn.addEventListener("click", async () => {
   pendingCount = 0;

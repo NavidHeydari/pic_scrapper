@@ -18,6 +18,7 @@ A Chrome extension (Manifest V3) that automatically captures and batch-downloads
 - **Configurable save folder** — set a custom parent directory from the popup or options page.
 - **Retry on failure** — failed downloads are kept so you can retry without losing progress.
 - **Path sanitization** — directory input is validated to prevent path traversal and illegal characters.
+- **Refresh expired photos** — in an open Daily Report email, **Find Expired Photos** lists the photos that no longer load; clicking again asks Bright Horizons to re-send each one (one new email per photo). Expired links are never downloaded as broken `.jpg` files.
 
 ## Installation
 
@@ -34,11 +35,22 @@ A Chrome extension (Manifest V3) that automatically captures and batch-downloads
 3. (Optional) Set a custom save folder name.
 4. Click **Download All** — images are saved to `Downloads/<folder>/<date>/`.
 5. Use **Clear** to reset the capture list for the current tab.
+6. If an email's photos have expired, open the email, click **Find Expired Photos**, then **Request N Refresh(es)**. Each photo opens briefly in a background tab and closes again; download the photos from the new emails Bright Horizons sends.
+
+## Tests
+
+```sh
+npm test
+```
+
+Uses Node's built-in `node:test` runner (Node 20+), no dependencies.
 
 ## Project Structure
 
 ```
 background.js    — Service worker: intercepts requests, manages state, handles downloads
+expired.js       — Expired-photo detection and refresh (loaded by the service worker)
+tests/           — node:test suite with a mocked chrome API
 popup.html/js/css — Extension popup UI
 options.html/js  — Settings page for configuring the save directory
 manifest.json    — Chrome extension manifest (MV3)

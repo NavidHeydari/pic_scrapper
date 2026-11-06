@@ -183,6 +183,33 @@ h1 {
   cursor: not-allowed;
 }
 
+.actions.refresh-row {
+  margin-top: 8px;
+}
+
+.actions button.refresh {
+  background: #fff;
+  color: #e65100;
+  border-color: #ff9800;
+}
+
+.actions button.refresh.confirm {
+  background: #e65100;
+  color: #fff;
+  border-color: #e65100;
+}
+
+.actions button.refresh.confirm:hover {
+  background: #bf360c;
+}
+
+.actions button.refresh:disabled {
+  color: #ffcc80;
+  border-color: #ffcc80;
+  background: #fff;
+  cursor: not-allowed;
+}
+
 .actions button.primary {
   background: #1a73e8;
   color: #fff;

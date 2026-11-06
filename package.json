@@ -1,0 +1,11 @@
+{
+  "name": "bh-picture-scraper",
+  "private": true,
+  "description": "Chrome extension tests — no dependencies, uses the built-in node:test runner.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

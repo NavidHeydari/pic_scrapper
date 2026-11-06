@@ -1,3 +1,5 @@
+importScripts("expired.js");
+
 // Broad glob for Chrome's webRequest filter — catches all media traffic under /media/m/
 const URL_PATTERN = "https://mbdgw.brighthorizons.com/api/parent/medias/*/media/m/*";
 
@@ -155,6 +157,8 @@ chrome.webRequest.onCompleted.addListener(
     const contentTypeHeader = details.responseHeaders?.find(
       (h) => h.name.toLowerCase() === "content-type"
     );
+    // Expired media serves an HTML notice page — not something to download.
+    if (isExpiredContentType(contentTypeHeader?.value)) return;
     const { ext } = contentTypeToExtension(contentTypeHeader?.value);
 
     const { uuid, url, prefix } = parsed;
@@ -210,6 +214,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "scanTab") {
     handleScanTab(message.tabId).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === "findExpired") {
+    handleFindExpired(message.tabId).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === "refreshExpired") {
+    handleRefreshExpired(message.tabId).then(sendResponse);
+    return true;
+  }
+
+  if (message.type === "getRefreshStatus") {
+    sendResponse(handleGetRefreshStatus());
     return true;
   }
 
@@ -400,19 +419,29 @@ async function handleScanTab(tabId) {
     const entries = tabEntries.get(key) || [];
     let added = 0;
     const failures = [];
+    const expiredUuids = new Set();
 
-    // Process direct media URLs found in the DOM.
-    // HEAD probes are staggered to avoid a burst of simultaneous requests.
-    for (const rawUrl of snapshotUrls) {
+    // HEAD-probe a media URL and add it as an entry, unless it is a duplicate or has expired.
+    // Probes are staggered to avoid a burst of simultaneous requests.
+    async function addProbedEntry(rawUrl) {
       const parsed = toDownloadUrl(rawUrl);
-      if (!parsed) continue;
+      if (!parsed) return;
       const { uuid, url, prefix } = parsed;
-      if (entries.some((e) => e.uuid === uuid)) continue;
+      if (entries.some((e) => e.uuid === uuid) || expiredUuids.has(uuid)) return;
       await randomDelay(300, 1_200);
       const contentType = await probeContentType(url);
+      if (isExpiredContentType(contentType)) {
+        expiredUuids.add(uuid);
+        return;
+      }
       const { ext } = contentTypeToExtension(contentType);
       entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
       added++;
+    }
+
+    // Process direct media URLs found in the DOM.
+    for (const rawUrl of snapshotUrls) {
+      await addProbedEntry(rawUrl);
     }
 
     // Fetch each HTM page and extract media URLs from it.
@@ -423,15 +452,7 @@ async function handleScanTab(tabId) {
         continue;
       }
       for (const mediaUrl of result.urls) {
-        const parsed = toDownloadUrl(mediaUrl);
-        if (!parsed) continue;
-        const { uuid, url, prefix } = parsed;
-        if (entries.some((e) => e.uuid === uuid)) continue;
-        await randomDelay(300, 1_200);
-        const contentType = await probeContentType(url);
-        const { ext } = contentTypeToExtension(contentType);
-        entries.push({ uuid, url, name: `${prefix}_${uuid}${ext}`, timestamp: Date.now() });
-        added++;
+        await addProbedEntry(mediaUrl);
       }
     }
 
@@ -446,6 +467,7 @@ async function handleScanTab(tabId) {
       added,
       total: entries.length,
       htmFound: htmUrls.length,
+      expired: expiredUuids.size,
       failures,
     };
   } catch (err) {
